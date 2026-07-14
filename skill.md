@@ -12,13 +12,13 @@ description: 分析你的 AI 对话历史，生成一篇走心的个人回顾文
 ### 第一步：运行分析引擎
 
 ```bash
-python C:/Users/26957/.claude/skills/prompttime/analyze.py
+python %USERPROFILE%/.claude/skills/prompttime/analyze.py
 ```
 
 但 analyze.py 是一个库模块，需要包装调用。用以下命令：
 
 ```bash
-cd C:/Users/26957/.claude/skills/prompttime && python -c "
+cd "%USERPROFILE%/.claude/skills/prompttime" && python -c "
 import json, sys
 sys.path.insert(0, '.')
 from analyze import analyze
@@ -59,14 +59,14 @@ print(json.dumps(data, ensure_ascii=False, indent=2))
 
 把写好的文章嵌入 HTML 模板：
 
-1. 读取 `C:/Users/26957/.claude/skills/prompttime/template.html`
+1. 读取 `%USERPROFILE%/.claude/skills/prompttime/template.html`
 2. 用 `<!-- CONTENT -->` 替换规则：
    - 模板中的 `<!-- CONTENT -->` 替换为你的文章 HTML
    - 文章体：每个段落用 `<p>...</p>` 包裹，段落间保留换行
    - 数据数字用 `<span class="n">数字</span>` 包裹
    - 高频词用 `<span class="w">词</span>` 包裹
    - 中文弯引号保持原样（直引号不转换）
-3. 保存到 `C:/Users/26957/Desktop/prompttime_report.html`（桌面）
+3. 保存到 `%USERPROFILE%/Desktop/prompttime_report.html`（桌面）
 4. **不要自动打开浏览器**。用户自己会打开。
 
 ### 第四步：告知用户
@@ -80,7 +80,7 @@ print(json.dumps(data, ensure_ascii=False, indent=2))
 
 ## 模板说明
 
-HTML 模板位置：`C:/Users/26957/.claude/skills/prompttime/template.html`
+HTML 模板位置：`%USERPROFILE%/.claude/skills/prompttime/template.html`
 
 模板包含：
 - 日/夜模式切换按钮（右上角）
