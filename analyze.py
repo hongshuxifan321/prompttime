@@ -1,5 +1,5 @@
 """
-Prompttime 深度分析引擎 v3
+Agenttime 深度分析引擎
 支持: Claude Code (JSONL) + ChatGPT (conversations.json)
 统一内部数据模型 → 分析 → 报告
 """
@@ -30,6 +30,13 @@ def is_meaningful(w: str) -> bool:
     w = w.strip().lower()
     if len(w) <= 1 or w in STOPWORDS_EN or w.isdigit(): return False
     return not CODE_PAT.match(w)
+
+# 中文虚词/高频功能字——过滤「的了」「是的」这类 bigram 噪声
+CN_FUNCTION_CHARS = set("的了在是有和就都与及或一个不以也不被把从为着这那它他她们我你其什么没还在可并但只又很能后前中上下回见说做想要让给用对向和")
+
+def is_meaningful_bigram(b: str) -> bool:
+    """二字词只要含虚字就过滤，保留有内容含义的词。"""
+    return not (b[0] in CN_FUNCTION_CHARS or b[1] in CN_FUNCTION_CHARS)
 
 def extract_text(cl: list) -> str:
     return " ".join(c.get("text","") for c in cl if isinstance(c,dict) and c.get("type")=="text")
@@ -72,7 +79,8 @@ def parse_claude_code(project_dir: str) -> list[dict]:
             hour = None; dt = None
             if ts:
                 try:
-                    dt = datetime.fromisoformat(ts.replace("Z","+00:00"))
+                    # jsonl 里是 UTC 时间戳，须转本地时区，否则小时统计整体偏移
+                    dt = datetime.fromisoformat(ts.replace("Z","+00:00")).astimezone()
                     hour = dt.hour; timestamps.append(dt); hours.append(hour)
                 except: pass
 
@@ -164,7 +172,7 @@ def parse_chatgpt(file_path: str) -> list[dict]:
             dt = None; hour = None
             if ct:
                 try:
-                    dt = datetime.fromtimestamp(ct, tz=timezone.utc)
+                    dt = datetime.fromtimestamp(ct, tz=timezone.utc).astimezone()
                     hour = dt.hour; timestamps.append(dt); hours.append(hour)
                 except: pass
 
@@ -191,23 +199,24 @@ def detect_and_parse(path: str) -> tuple[list[dict], str]:
     """自动检测数据源并解析，返回 (会话列表, 来源说明)"""
     if os.path.isdir(path):
         sessions = parse_claude_code(path)
-        if sessions: return sessions, f"Claude Code ({len(sessions)} 次会话)"
+        if sessions:
+            return sessions, f"Claude Code ({len(sessions)} 次会话)"
+        # 目录里也可能是 ChatGPT 导出（修复：原代码此处永远不可达）
+        cf = os.path.join(path, "conversations.json")
+        if os.path.exists(cf):
+            try:
+                sessions = parse_chatgpt(cf)
+                if sessions:
+                    return sessions, f"ChatGPT ({len(sessions)} 次会话)"
+            except Exception: pass
         return [], ""
 
     if os.path.isfile(path):
         try:
             sessions = parse_chatgpt(path)
-            if sessions: return sessions, f"ChatGPT ({len(sessions)} 次会话)"
+            if sessions:
+                return sessions, f"ChatGPT ({len(sessions)} 次会话)"
         except Exception: pass
-
-    # 尝试目录里的 conversations.json
-    if os.path.isdir(path):
-        cf = os.path.join(path, "conversations.json")
-        if os.path.exists(cf):
-            try:
-                sessions = parse_chatgpt(cf)
-                if sessions: return sessions, f"ChatGPT ({len(sessions)} 次会话)"
-            except Exception: pass
 
     return [], ""
 
@@ -292,7 +301,9 @@ def analyze_sessions(sessions: list[dict]) -> dict:
     cn_bigram = Counter()
     for t in all_user_texts:
         for part in re.findall(r'[一-鿿]+',t):
-            for i in range(len(part)-1): cn_bigram[part[i:i+2]] += 1
+            for i in range(len(part)-1):
+                bg = part[i:i+2]
+                if is_meaningful_bigram(bg): cn_bigram[bg] += 1
     top_cn = cn_bigram.most_common(30)
 
     cn_chars = sum(1 for t in all_user_texts for ch in t if "一"<=ch<="鿿")
@@ -358,7 +369,9 @@ def analyze_sessions(sessions: list[dict]) -> dict:
         for w in title.split():
             if is_meaningful(w): title_words[w] += 1
         for part in re.findall(r'[一-鿿]+',title):
-            for i in range(len(part)-1): title_words[part[i:i+2]] += 1
+            for i in range(len(part)-1):
+                bg = part[i:i+2]
+                if is_meaningful_bigram(bg): title_words[bg] += 1
     recurring_topics = title_words.most_common(12)
 
     # ── 七、非凡时刻 ──
@@ -433,3 +446,16 @@ def analyze(project_dir: str | None = None) -> dict:
     result = analyze_sessions(sessions)
     result["source_label"] = source_label
     return result
+
+
+# ═══════════════════════════════════════════════════
+# CLI 入口
+# ═══════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    """CLI: python analyze.py [数据路径] → 分析结果 JSON 到 stdout"""
+    import sys
+    path = sys.argv[1] if len(sys.argv) > 1 else None
+    data = analyze(path)
+    data.pop("user_texts_sample", None)
+    print(json.dumps(data, ensure_ascii=False, indent=2))
