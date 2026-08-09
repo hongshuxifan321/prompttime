@@ -55,7 +55,7 @@ python ~/.claude/skills/agenttime/analyze.py
    - 数据数字用 `<span class="n">数字</span>` 包裹
    - 高频词用 `<span class="w">词</span>` 包裹
    - 中文弯引号保持原样（直引号不转换）
-3. 保存到 `~/Desktop/agenttime_report.html`（桌面）
+3. 保存到 `~/Desktop/agenttime_report_YYYYMMDD.html`（桌面，日期取今天，如 `agenttime_report_20260809.html`）。**不要覆盖之前日期的回顾**——每次生成一份带日期的新文件，用户自己决定保留哪些
 4. **不要自动打开浏览器**。用户自己会打开。
 
 ### 第四步：告知用户
@@ -107,7 +107,7 @@ HTML 模板位置：`~/.claude/skills/agenttime/template.html`
 | morning_pct / afternoon_pct / evening_pct / late_night_pct | 四时段占比（本地时区） |
 | max_streak | 最长连续天数 |
 | avg_gap | 平均间隔天数 |
-| busiest_weekday | 最活跃星期 |
+| busiest_weekday | 最活跃星期（中文，如「周三」） |
 | cn_ratio | 中文字符占比 |
 | top_words | 英文高频词 Top 40 |
 | top_cn | 中文高频二字词 Top 30（已滤虚词） |
@@ -122,7 +122,6 @@ HTML 模板位置：`~/.claude/skills/agenttime/template.html`
 | think_depth_dist | 思考深度分布 |
 | deep_hours | 深度思考时段 |
 | recurring_topics | 会话标题高频词 |
-| total_titles | 会话标题总数 |
 | sources | 数据来源统计 |
 | source_label | 数据来源标签 |
 
@@ -131,7 +130,5 @@ HTML 模板位置：`~/.claude/skills/agenttime/template.html`
 - 数据中的 `%` 是百分号，HTML 中不需要特殊处理
 - 文章中不要出现任何 markdown 标记（如 `**`、`#`）
 - 数字使用半角阿拉伯数字（如「30 次」而非「三十次」）
-- 如果在模板中发现 `%%`，那是 CSS 样式中的百分比（已被转义），渲染后会自动变为 `%`
 - 一定不要改 analyze.py——分析逻辑和写作逻辑是完全分离的
 - 所有时间统计已转换为本地时区，直接使用即可
-- 用户高频词抽样（如果有 `user_texts_sample`）不要写入文章，那是隐私内容

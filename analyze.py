@@ -29,6 +29,10 @@ CODE_PAT = re.compile(r'^[{}[\],:;"\'()=<>/\\|@#$%^&*+~`._-]+$')
 def is_meaningful(w: str) -> bool:
     w = w.strip().lower()
     if len(w) <= 1 or w in STOPWORDS_EN or w.isdigit(): return False
+    # JSON 键残留（"type": 等）— 含引号或冒号直接滤掉
+    if '"' in w or ':' in w: return False
+    # 日志/JSON 残片（[request、user] 等）— 首尾括号直接滤掉
+    if w.startswith(("[", "{")) or w.endswith(("]", "}")): return False
     return not CODE_PAT.match(w)
 
 # 中文虚词/高频功能字——过滤「的了」「是的」这类 bigram 噪声
@@ -38,8 +42,15 @@ def is_meaningful_bigram(b: str) -> bool:
     """二字词只要含虚字就过滤，保留有内容含义的词。"""
     return not (b[0] in CN_FUNCTION_CHARS or b[1] in CN_FUNCTION_CHARS)
 
+MAX_MSG_CHARS = 2000
+
+# 数据里的孤立代理字符(JSON \uXXXX 转义可能产生非法码元), 统计前剔除
+_SURROGATE_RE = re.compile(r'[\ud800-\udfff]')
+
 def extract_text(cl: list) -> str:
-    return " ".join(c.get("text","") for c in cl if isinstance(c,dict) and c.get("type")=="text")
+    """提取文本并截断单条消息, 防止巨型粘贴污染总量与高频词统计。"""
+    text = " ".join(c.get("text","") for c in cl if isinstance(c,dict) and c.get("type")=="text")
+    return _SURROGATE_RE.sub("", text)[:MAX_MSG_CHARS]
 
 
 # ═══════════════════════════════════════════════════
@@ -103,6 +114,13 @@ def parse_claude_code(project_dir: str) -> list[dict]:
             elif t == "file-history-delta":
                 p = ev.get("trackingPath","")
                 if p: files_touched.append(os.path.basename(p))
+            elif t == "file-history-snapshot":
+                # 新版 Claude Code: snapshot.trackedFileBackups 的键是文件路径
+                backups = ev.get("snapshot", {}).get("trackedFileBackups", {})
+                if isinstance(backups, dict):
+                    for p in backups:
+                        if p:
+                            files_touched.append(os.path.basename(p))
 
         if any(m["role"]=="user" for m in msgs):
             sessions.append({
@@ -240,6 +258,8 @@ def analyze_sessions(sessions: list[dict]) -> dict:
     all_user_texts = [m["text"] for m in user_msgs_all]
     all_hours = [h for s in sessions for h in s["hours"]]
     all_timestamps = sorted(t for s in sessions for t in s["timestamps"])
+    if not all_timestamps:
+        return {"error": "没有可用的时间戳数据"}
     total_thinking = sum(s["thinking_count"] for s in sessions)
     total_tools = sum(len(s["tool_calls"]) for s in sessions)
 
@@ -270,9 +290,12 @@ def analyze_sessions(sessions: list[dict]) -> dict:
     hour_dist = Counter(all_hours)
     peak_hour = max(hour_dist,key=hour_dist.get) if hour_dist else 0
     peak_count = hour_dist[peak_hour]
+    WEEKDAY_CN = {"Monday":"周一","Tuesday":"周二","Wednesday":"周三",
+                  "Thursday":"周四","Friday":"周五","Saturday":"周六","Sunday":"周日"}
     all_weekdays = [t.strftime("%A") for t in all_timestamps]
     weekday_dist = Counter(all_weekdays)
-    busiest_weekday = weekday_dist.most_common(1)[0][0] if weekday_dist else "N/A"
+    wd_en = weekday_dist.most_common(1)[0][0] if weekday_dist else ""
+    busiest_weekday = WEEKDAY_CN.get(wd_en, wd_en or "N/A")
 
     def period_pct(s,e):
         n = sum(hour_dist[h] for h in range(s,e))
@@ -296,7 +319,7 @@ def analyze_sessions(sessions: list[dict]) -> dict:
     for t in all_user_texts:
         for w in t.split():
             if is_meaningful(w): word_counter[w.lower()] += 1
-    top_words = [(w,c) for w,c in word_counter.most_common(200) if is_meaningful(w)][:40]
+    top_words = word_counter.most_common(40)
 
     cn_bigram = Counter()
     for t in all_user_texts:
@@ -310,11 +333,12 @@ def analyze_sessions(sessions: list[dict]) -> dict:
     en_chars = sum(1 for t in all_user_texts for ch in t if ch.isascii() and ch.isalpha())
     cn_ratio = round(cn_chars/(cn_chars+en_chars)*100,1) if (cn_chars+en_chars)>0 else 0
 
+    # 行为关键词用成词/词边界, 不用单字, 否则「对」「不是」等日常高频字系统性误报
     thank_n = sum(1 for t in all_user_texts if re.search(r"谢谢|感谢|thanks|thank\s*you",t,re.I))
-    sorry_n = sum(1 for t in all_user_texts if re.search(r"不对|不是|错了|重新|重来|再试|不行|搞错",t))
+    sorry_n = sum(1 for t in all_user_texts if re.search(r"不对|错了|重新|重来|再试|不行|搞错",t))
     please_n = sum(1 for t in all_user_texts if re.search(r"请|帮|能不能|可不可以|帮忙",t))
-    interrupt_n = sum(1 for t in all_user_texts if re.search(r"算了|停下|别跑了|别弄了|等等|Stop",t,re.I))
-    confirm_n = sum(1 for t in all_user_texts if re.search(r"好的|OK|对|没错|嗯|可以|行",t,re.I))
+    interrupt_n = sum(1 for t in all_user_texts if re.search(r"算了|停下|别跑了|别弄了|等等|\bStop\b",t,re.I))
+    confirm_n = sum(1 for t in all_user_texts if re.search(r"好的|OK|没错|嗯|可以|行吧|没问题|对的|说得对",t,re.I))
 
     daily_lens = defaultdict(list)
     for m in user_msgs_all:
@@ -412,7 +436,6 @@ def analyze_sessions(sessions: list[dict]) -> dict:
         "think_depth_dist":dict(think_depth_dist.most_common(8)),
         "deep_hours":dict(deep_hours.most_common(6)),
         "recurring_topics":recurring_topics,
-        "total_titles":sum(len(s["title"])>0 for s in sessions),
         "longest_3":longest_3,"most_tool_3":most_tool_3,
         "top_3_days":top_3_days,
         "sources":dict(sources),
@@ -455,7 +478,10 @@ def analyze(project_dir: str | None = None) -> dict:
 if __name__ == "__main__":
     """CLI: python analyze.py [数据路径] → 分析结果 JSON 到 stdout"""
     import sys
+    # Windows 管道下 Python 默认按 GBK 编码输出, Claude Code 按 UTF-8 读取
+    # 会得到乱码 JSON。必须显式切到 UTF-8。
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     path = sys.argv[1] if len(sys.argv) > 1 else None
     data = analyze(path)
-    data.pop("user_texts_sample", None)
     print(json.dumps(data, ensure_ascii=False, indent=2))
