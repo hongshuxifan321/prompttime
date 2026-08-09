@@ -63,6 +63,12 @@ def parse_claude_code(project_dir: str) -> list[dict]:
         glob.glob(os.path.join(project_dir, "*", "*.jsonl")) +
         glob.glob(os.path.join(project_dir, "*.jsonl"))
     ))
+    # 排除 subagents/ 子目录: 子代理会话是 AI 对 AI, 不计入「用户会话」统计
+    # (主代理派生子代理时该目录才会出现, 不排除会污染 total_sessions 等指标)
+    jsonl_files = [
+        fp for fp in jsonl_files
+        if "subagents" not in os.path.normpath(fp).split(os.sep)
+    ]
     sessions_raw = {}
     for fp in jsonl_files:
         sid = os.path.splitext(os.path.basename(fp))[0]
@@ -96,7 +102,8 @@ def parse_claude_code(project_dir: str) -> list[dict]:
                 except: pass
 
             if t == "ai-title":
-                titles.append(ev.get("aiTitle",""))
+                # 标题同样可能有孤立代理字符，过滤后作为散文素材才可用
+                titles.append(_SURROGATE_RE.sub("", ev.get("aiTitle","")))
             elif t == "user":
                 text = extract_text(ev.get("message",{}).get("content",[]))
                 if text: msgs.append({"role":"user","text":text,"timestamp":dt,"hour":hour})
@@ -340,16 +347,23 @@ def analyze_sessions(sessions: list[dict]) -> dict:
     interrupt_n = sum(1 for t in all_user_texts if re.search(r"算了|停下|别跑了|别弄了|等等|\bStop\b",t,re.I))
     confirm_n = sum(1 for t in all_user_texts if re.search(r"好的|OK|没错|嗯|可以|行吧|没问题|对的|说得对",t,re.I))
 
-    daily_lens = defaultdict(list)
-    for m in user_msgs_all:
-        ts = m.get("timestamp")
-        if ts: daily_lens[ts.strftime("%Y-%m-%d")].append(len(m["text"]))
-    daily_avg_len = {d:round(sum(ll)/len(ll),1) for d,ll in daily_lens.items()}
-    ds = sorted(daily_avg_len.keys())
-    fw_dates = ds[:7]; rw_dates = ds[-7:]
-    fw_avg = round(sum(daily_avg_len[d] for d in fw_dates)/len(fw_dates),1) if fw_dates else 0
-    rw_avg = round(sum(daily_avg_len[d] for d in rw_dates)/len(rw_dates),1) if rw_dates else 0
-    length_trend = "变短了" if rw_avg<fw_avg else ("变长了" if rw_avg>fw_avg else "没有变化")
+    # 消息长度趋势: 按时间序首尾各 25% 的消息(不重叠, 数据少也不会首尾交叉),
+    # 相对差超过 5% 才算趋势——原「首/末 7 天」在活跃天数不足 14 天时会重叠,
+    # 且 0.1% 的微小差异也被判成「变长」, 噪声敏感
+    lens_by_time = [len(m["text"]) for m in
+                    sorted(user_msgs_all, key=lambda m: m.get("timestamp") or "")]
+    n = len(lens_by_time)
+    q = max(1, n // 4)
+    fw_seg, rw_seg = lens_by_time[:q], lens_by_time[-q:]
+    fw_avg = round(sum(fw_seg) / len(fw_seg), 1) if fw_seg else 0
+    rw_avg = round(sum(rw_seg) / len(rw_seg), 1) if rw_seg else 0
+    if fw_avg <= 0:
+        length_trend = "没有明显变化"
+    else:
+        diff = (rw_avg - fw_avg) / fw_avg
+        length_trend = ("变长了" if diff > 0.05
+                        else "变短了" if diff < -0.05
+                        else "没有明显变化")
 
     # ── 四、工具 ──
     tool_counter = Counter()
@@ -399,10 +413,12 @@ def analyze_sessions(sessions: list[dict]) -> dict:
     recurring_topics = title_words.most_common(12)
 
     # ── 七、非凡时刻 ──
-    sess_by_len = sorted([(s["id"],len([m for m in s["messages"] if m["role"]=="user"])) for s in sessions],key=lambda x:-x[1])
-    sess_by_tool = sorted([(s["id"],len(s["tool_calls"])) for s in sessions],key=lambda x:-x[1])
+    # 带标题输出: (id, 标题, 数量)。标题是写作素材——作者要写「最长的那次会话」得知道它在谈什么
+    sess_by_len = sorted([(s["id"], s["title"], len([m for m in s["messages"] if m["role"]=="user"])) for s in sessions],key=lambda x:-x[2])
+    sess_by_tool = sorted([(s["id"], s["title"], len(s["tool_calls"])) for s in sessions],key=lambda x:-x[2])
     longest_3 = sess_by_len[:3]
     most_tool_3 = sess_by_tool[:3]
+    top_session_titles = sess_by_len[:8]
 
     # ── 来源信息 ──
     sources = Counter(s["source"] for s in sessions)
@@ -437,6 +453,7 @@ def analyze_sessions(sessions: list[dict]) -> dict:
         "deep_hours":dict(deep_hours.most_common(6)),
         "recurring_topics":recurring_topics,
         "longest_3":longest_3,"most_tool_3":most_tool_3,
+        "top_session_titles":top_session_titles,
         "top_3_days":top_3_days,
         "sources":dict(sources),
     }
